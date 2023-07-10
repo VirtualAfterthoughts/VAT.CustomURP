@@ -1,0 +1,27 @@
+{
+  "name": "com.unity.render-pipelines.universal",
+  "description": "A fork of Unity's 'Universal Render Pipeline' to add various new features and specific improvements!","version": "12.1.8",
+  "unity": "2021.2",
+  "displayName": "zCubed-URP",
+  "dependencies": {
+    "com.unity.mathematics": "1.2.1",
+    "com.unity.burst": "1.7.3",
+    "com.unity.render-pipelines.core": "12.1.8",
+    "com.unity.shadergraph": "12.1.8"
+  },
+  "keywords": [
+    "graphics",
+    "performance",
+    "rendering",
+    "mobile",
+    "render",
+    "pipeline"
+  ],
+  "samples": [
+    {
+      "displayName": "URP Package Samples",
+      "description": "Collection of scenes showcasing different features of the Universal Render Pipeline.",
+      "path": "Samples~/URPPackageSamples"
+    }
+  ]
+}

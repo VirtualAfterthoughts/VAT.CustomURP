@@ -1,0 +1,45 @@
+#pragma kernel BakedSample
+
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "VolumeComputeCommon.hlsl"
+
+//
+// Fog Inputs
+//
+Texture3D<float4> _MainTex;
+RWTexture3D<float4> _Result;
+
+float4x4 _BakeMatrixInverse;
+float4 _BakeOrigin;
+float4 _BakeExtents;
+
+SamplerState sampler_LinearClamp;
+
+bool IsPointWithinBox(float3 location)
+{
+    float3 boxPoint = mul(_BakeMatrixInverse, float4(location, 1)).xyz;
+    
+    float3 maxPoint = (_BakeOrigin + _BakeExtents).xyz;
+    float3 minPoint = (_BakeOrigin - _BakeExtents).xyz;
+    
+    return all(boxPoint <= maxPoint) && all(boxPoint >= minPoint);
+}
+
+float3 AdjustPointWithinBox(float3 location)
+{
+    return (mul(_BakeMatrixInverse, float4(location, 1)).xyz / _BakeExtents.xyz / 2) + 0.5;
+}
+
+VOXEL_THREADS
+void BakedSample(uint3 id : SV_DispatchThreadID)
+{
+    float3 sPoint = GetSamplePoint(id);
+    
+    // Use mipmaps based on distance
+    float dist = id.z / _PassData.z;
+    float mipSlice = (dist * dist) * 2;
+
+    float3 sampled = _MainTex.SampleLevel(sampler_LinearClamp, AdjustPointWithinBox(sPoint), mipSlice).rgb * _FogParams.z * IsPointWithinBox(sPoint);
+
+    _Result[id.xyz] += float4(sampled, 1);
+}

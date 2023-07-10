@@ -1,0 +1,174 @@
+#pragma kernel MainLightSample
+#pragma kernel AdditionalLightSample
+
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#include "VolumeComputeCommon.hlsl"
+
+//
+// URP constants
+//
+#define MAX_SHADOW_CASCADES 4
+#define MAX_VISIBLE_LIGHTS 256
+
+//
+// URP Inputs
+//
+Texture2D<float> _MainShadowmap;
+SamplerComparisonState sampler_MainShadowmap;
+
+Texture2D<float> _AdditionalShadowmap;
+SamplerComparisonState sampler_AdditionalShadowmap;
+
+float4x4 _MainLightWorldToShadow[MAX_SHADOW_CASCADES + 1];
+float4 _MainLightShadowParams;
+float4 _CascadeShadowSplitSpheres0;
+float4 _CascadeShadowSplitSpheres1;
+float4 _CascadeShadowSplitSpheres2;
+float4 _CascadeShadowSplitSpheres3;
+float4 _CascadeShadowSplitSphereRadii;
+
+half4 _AdditionalShadowParams[MAX_VISIBLE_LIGHTS];
+float4x4 _AdditionalLightsWorldToShadow[MAX_VISIBLE_LIGHTS];
+half4 _AdditionalLightsFogIndices[MAX_VISIBLE_LIGHTS];
+
+//
+// Fog Inputs
+//
+RWTexture3D<float4> _Result;
+
+//
+// URP borrowed functions
+//
+half ComputeCascadeIndex(float3 positionWS)
+{
+    float3 fromCenter0 = positionWS - _CascadeShadowSplitSpheres0.xyz;
+    float3 fromCenter1 = positionWS - _CascadeShadowSplitSpheres1.xyz;
+    float3 fromCenter2 = positionWS - _CascadeShadowSplitSpheres2.xyz;
+    float3 fromCenter3 = positionWS - _CascadeShadowSplitSpheres3.xyz;
+    float4 distances2 = float4(dot(fromCenter0, fromCenter0), dot(fromCenter1, fromCenter1), dot(fromCenter2, fromCenter2), dot(fromCenter3, fromCenter3));
+
+    half4 weights = half4(distances2 < _CascadeShadowSplitSphereRadii);
+    weights.yzw = saturate(weights.yzw - weights.xyz);
+
+    return half(4.0) - dot(weights, half4(4, 3, 2, 1));
+}
+
+float DistanceAttenuation(float distanceSqr, half2 distanceAttenuation)
+{
+    // We use a shared distance attenuation for additional directional and puctual lights
+    // for directional lights attenuation will be 1
+    float lightAtten = rcp(distanceSqr);
+    float2 distanceAttenuationFloat = float2(distanceAttenuation);
+
+#if SHADER_HINT_NICE_QUALITY
+    // Use the smoothing factor also used in the Unity lightmapper.
+    half factor = half(distanceSqr * distanceAttenuationFloat.x);
+    half smoothFactor = saturate(half(1.0) - factor * factor);
+    smoothFactor = smoothFactor * smoothFactor;
+#else
+    // We need to smoothly fade attenuation to light range. We start fading linearly at 80% of light range
+    // Therefore:
+    // fadeDistance = (0.8 * 0.8 * lightRangeSq)
+    // smoothFactor = (lightRangeSqr - distanceSqr) / (lightRangeSqr - fadeDistance)
+    // We can rewrite that to fit a MAD by doing
+    // distanceSqr * (1.0 / (fadeDistanceSqr - lightRangeSqr)) + (-lightRangeSqr / (fadeDistanceSqr - lightRangeSqr)
+    // distanceSqr *        distanceAttenuation.y            +             distanceAttenuation.z
+    half smoothFactor = half(saturate(distanceSqr * distanceAttenuationFloat.x + distanceAttenuationFloat.y));
+#endif
+
+    return lightAtten * smoothFactor;
+}
+
+half AngleAttenuation(half3 spotDirection, half3 lightDirection, half2 spotAttenuation)
+{
+    // Spot Attenuation with a linear falloff can be defined as
+    // (SdotL - cosOuterAngle) / (cosInnerAngle - cosOuterAngle)
+    // This can be rewritten as
+    // invAngleRange = 1.0 / (cosInnerAngle - cosOuterAngle)
+    // SdotL * invAngleRange + (-cosOuterAngle * invAngleRange)
+    // SdotL * spotAttenuation.x + spotAttenuation.y
+
+    // If we precompute the terms in a MAD instruction
+    half SdotL = dot(spotDirection, lightDirection);
+    half atten = saturate(SdotL * spotAttenuation.x + spotAttenuation.y);
+    return atten * atten;
+}
+
+// TODO: Optimization
+
+VOXEL_THREADS
+void MainLightSample(uint3 id : SV_DispatchThreadID)
+{
+    float3 sPoint = GetSamplePoint(id);
+    float3 sampled = 0;
+        
+    float cascadeIndex = ComputeCascadeIndex(sPoint);
+    float3 shadowPoint = mul(_MainLightWorldToShadow[cascadeIndex], float4(sPoint, 1)).xyz;
+
+    float shadow = 1;
+        
+    if (_MainLightShadowParams.x > 0)
+        shadow = _MainShadowmap.SampleCmpLevelZero(sampler_MainShadowmap, shadowPoint.xy, shadowPoint.z);
+    
+    //float LDotV = saturate(dot(-_MainLightPosition.xyz, sDir));
+    //LDotV = params.x <= 0.0 ? 1.0 : pow(LDotV, params.x);
+    //float fac = saturate(MieScattering(LDotV, _FogParams.w)) * shadow;
+    float fac = shadow;
+            
+    sampled += _MainLightColor.xyz * fac;
+
+    _Result[id.xyz] += float4(sampled, 1);
+}
+
+VOXEL_THREADS
+void AdditionalLightSample(uint3 id : SV_DispatchThreadID)
+{
+    float3 sPoint = GetSamplePoint(id);
+    float3 sampled = 0;
+    
+    [loop]
+    for (int i = 0; i < _AdditionalLightsCount.x; i++)
+    {
+        float4 indices = _AdditionalLightsFogIndices[i];
+        int l = int(indices.x);
+        
+        float4 lAtten = _AdditionalLightsAttenuation[l];
+        float4 lSpotDir = _AdditionalLightsSpotDir[l];
+        
+        float3 lVector = _AdditionalLightsPosition[l].xyz - sPoint * _AdditionalLightsPosition[l].w;
+        float dSqr = max(dot(lVector, lVector), 0.0);
+
+        half3 lDir = half3(lVector * rsqrt(dSqr));
+        half attenuation = half(DistanceAttenuation(dSqr, lAtten.xy) * AngleAttenuation(lSpotDir.xyz, lDir, lAtten.zw));
+        
+        float4 shadowParams = _AdditionalShadowParams[l];
+        int shadowSliceIndex = shadowParams.w;
+        
+        float shadow;
+        [branch]
+        if (shadowSliceIndex >= 0)
+        {
+            if (shadowParams.z)
+            {
+                float cubemapFaceId = CubeMapFaceID(-lDir);
+                shadowSliceIndex += cubemapFaceId;
+            }
+            
+            float4 shadowPoint = mul(_AdditionalLightsWorldToShadow[shadowSliceIndex], float4(sPoint, 1));
+            shadowPoint.xyz /= shadowPoint.w;
+            
+            shadow = _AdditionalShadowmap.SampleCmpLevelZero(sampler_AdditionalShadowmap, shadowPoint.xy, shadowPoint.z);
+        }
+        else
+            shadow = 1;
+        
+        //float LDotV = saturate(dot(lDir, sDir));
+        //LDotV = params.x <= 0.0 ? 1.0 : pow(LDotV, params.x);
+        //float fac = saturate(MieScattering(LDotV, _FogParams.w)) * attenuation * shadow;
+        float fac = attenuation * shadow;
+        
+        sampled += _AdditionalLightsColor[l].xyz * fac;
+    }
+    
+    _Result[id.xyz] += float4(sampled * _FogParams.z, 1);
+}

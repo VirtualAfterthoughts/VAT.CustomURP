@@ -1,0 +1,43 @@
+#pragma kernel CSMain
+#pragma kernel VolumetricClear
+
+#pragma multi_compile_local _ QUALITY_LOW QUALITY_MEDIUM QUALITY_HIGH QUALITY_ULTRA QUALITY_OVERKILL
+
+RWTexture3D<float4> _Result;
+RWTexture3D<float4> _MainTex;
+
+float4 _PassData;
+float4 _NoiseData;
+
+#if defined(QUALITY_OVERKILL)
+#define SLICES 256
+#elif defined(QUALITY_ULTRA)
+#define SLICES 128
+#elif defined(QUALITY_HIGH)
+#define SLICES 96
+#elif defined(QUALITY_MEDIUM)
+#define SLICES 64
+#elif defined(QUALITY_LOW)
+#define SLICES 32
+#else
+#define SLICES 16
+#endif
+
+[numthreads(16, 16, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    float4 sum = 0;
+    for (int s = 0; s < SLICES; s++)
+    {
+        float4 sample = _MainTex[uint3(id.xy, s)];
+        sum += sample / float(SLICES);
+        
+        _Result[uint3(id.xy, s)] = sum;
+    }
+}
+
+[numthreads(4, 4, 4)]
+void VolumetricClear(uint3 id : SV_DispatchThreadID)
+{
+    _Result[id.xyz] = 0;
+}
